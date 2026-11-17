@@ -55,6 +55,7 @@ pgweb (`docker compose -f docker-compose.pgweb.yml up -d`). Port 443 listens on 
 reach this machine gets superuser access to the database: unless it's only your laptop, also set `PGWEB_AUTH_USER` /
 `PGWEB_AUTH_PASS` (HTTP basic auth, applies to both ports). With the setting off, /pgweb/ returns 404; with pgweb
 stopped, 503.
+
 Stop pgweb before `docker compose -f docker-compose.dev.yml down`, otherwise the network can't be removed while
 pgweb is still attached.
 
@@ -77,12 +78,124 @@ pgweb is still attached.
 
 ## Add a webapp (e.g. app3)
 
-1. `cp -R apps/app1 apps/app3`, then replace `app1`/`5101`/`8101` with `app3`/`5103`/`8103` in its
-   `frontend/package.json`, `frontend/vite.config.js` and `frontend/index.html`.
-2. `docker-compose.dev.yml`: copy the two `app1-*` services as `app3-*` (ports, `APP_NAME`, `ROOT_PATH`,
-   `BASE_PATH`, `API_PROXY_TARGET`, `DATABASE_URL`) and add `app3:${APP3_DB_PASSWORD:-app3}` to `APP_DATABASES`.
-3. `cp nginx/apps/app1.conf nginx/apps/app3.conf` and replace the names and ports. Add an entry to `APPS` in `nginx/html/index.html` (it gets a card with checks and a Go button).
-4. `docker compose -f docker-compose.dev.yml up --build -d` (db-init creates the new database; no reset needed).
+A new app is a copy of `apps/app1` plus four small config edits: compose services, a database, an nginx route and a
+landing page entry. The example uses `app3` with frontend port **5103** and backend port **8103**. Pick ports that
+no other app uses. Run the commands from the repo root.
+
+### 1. Copy the code
+
+```bash
+rsync -a --exclude node_modules apps/app1/ apps/app3/
+grep -rlE 'app1|App 1|5101|8101' apps/app3 | xargs perl -pi -e 's/app1/app3/g; s/App 1/App 3/g; s/5101/5103/g; s/8101/8103/g'
+```
+
+That renames the app in the frontend (`package.json` name, page `<title>`, heading in `src/App.jsx`) and the
+fallback base path and ports in `frontend/vite.config.js`. Docker Compose sets the actual values (step 2).
+
+- **Frontend** (`apps/app3/frontend`): build every URL from `import.meta.env.BASE_URL`, as `src/api.js` does. Never start a path with `/`.
+- **Backend** (`apps/app3/backend`): needs no edits. `APP_NAME`, `ROOT_PATH`, `PORT` and `DATABASE_URL` come
+  from compose. Keep its routes under `/api`. Tables in `app/models.py` are created on startup, in app3's own
+  database.
+
+### 2. Add the services to `docker-compose.dev.yml`
+
+Add these two services next to the `app1`/`app2` ones. Only the names, ports and paths differ from app1:
+
+```yaml
+  # ---------------------------------------------------------------- app3
+  app3-backend:
+    build:
+      context: ./apps/app3/backend
+      dockerfile: Dockerfile.dev
+    environment:
+      <<: *backend-env
+      PORT: "8103"
+      APP_NAME: app3
+      ROOT_PATH: /app3
+      DATABASE_URL: postgresql+psycopg://app3:${APP3_DB_PASSWORD:-app3}@db:5432/app3
+    ports:
+      - "127.0.0.1:8103:8103"
+    volumes:
+      - ./apps/app3/backend:/app
+    depends_on:
+      db-init:
+        condition: service_completed_successfully
+
+  app3-frontend:
+    build:
+      context: ./apps/app3/frontend
+      dockerfile: Dockerfile.dev
+    environment:
+      <<: *frontend-env
+      PORT: "5103"
+      BASE_PATH: /app3/
+      API_PROXY_TARGET: http://app3-backend:8103
+    ports:
+      - "127.0.0.1:5103:5103"
+    volumes:
+      - ./apps/app3/frontend:/app
+      - /app/node_modules
+    depends_on:
+      - app3-backend
+```
+
+### 3. Give it a database
+
+In the same file, add a line to `APP_DATABASES` under `db-init`:
+
+```yaml
+      APP_DATABASES: >-
+        app1:${APP1_DB_PASSWORD:-app1}
+        app2:${APP2_DB_PASSWORD:-app2}
+        app3:${APP3_DB_PASSWORD:-app3}
+```
+
+Add `APP3_DB_PASSWORD=app3` to `.env.example` (and to `.env` if you have one). On a server, use a strong password.
+`db-init` creates the `app3` role and database on the next `up`, without touching existing data.
+
+### 4. Route it in nginx
+
+```bash
+perl -pe 's/app1/app3/g; s/5101/5103/g; s/8101/8103/g' nginx/apps/app1.conf > nginx/apps/app3.conf
+```
+
+This sends `/app3/api/*` to `app3-backend:8103` with the `/app3` prefix removed, and everything else under `/app3/`
+to `app3-frontend:5103`.
+
+### 5. Add it to the landing page
+
+In `nginx/html/index.html`, add an entry to `APPS`. It gets a card with frontend and backend checks and a Go button:
+
+```js
+const APPS = [
+  { name: "App 1", path: "/app1/", kind: "webapp" },
+  { name: "App 2", path: "/app2/", kind: "webapp" },
+  { name: "App 3", path: "/app3/", kind: "webapp" },
+  { name: "pgweb", path: "/pgweb/", kind: "pgweb" },
+];
+```
+
+### 6. Start it
+
+```bash
+docker compose -f docker-compose.dev.yml up --build -d          # builds app3, db-init creates its database
+docker compose -f docker-compose.dev.yml exec nginx nginx -s reload   # nginx only reads apps/*.conf when it (re)loads
+```
+
+The rest of the stack keeps running, and no database reset is needed.
+
+### 7. Check it
+
+- https://localhost/: the App 3 card shows **OK** for Frontend and Backend. **Go** opens it.
+- https://localhost/app3/api/health returns `{"status": "ok", "app": "app3", "database": "app3", ...}`.
+- https://localhost/app3/api/docs: the FastAPI docs.
+- Direct, for debugging: http://localhost:5103/app3/ (frontend) and http://localhost:8103/api/health (backend).
+- pgweb: `app3` appears in its database menu.
+
+If the card shows 502 or 504, look at `docker compose -f docker-compose.dev.yml logs app3-frontend app3-backend`.
+If `/app3/` returns the landing page or a 404, nginx hasn't been reloaded (step 6).
+
+Optionally, add app3 to the diagram and the URL table at the top of this README.
 
 ## On a server
 
