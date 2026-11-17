@@ -35,6 +35,9 @@
       .status.warn { color: var(--warn); } .status.pending { color: var(--pending); }
       button { font: inherit; padding: 6px 12px; border: 1px solid var(--border); border-radius: 6px; background: var(--panel); color: var(--fg); cursor: pointer; }
       button:hover { border-color: var(--border-hover); }
+      .actions { display: flex; gap: 6px; flex-shrink: 0; }
+      .card-head .go { font: inherit; padding: 6px 12px; border: 1px solid var(--border); border-radius: 6px; background: var(--fg); color: var(--bg); text-decoration: none; font-weight: 600; }
+      .card-head .go:hover { opacity: 0.85; text-decoration: none; }
       button:disabled { opacity: 0.6; cursor: default; }
       form { display: flex; gap: 8px; flex-wrap: wrap; }
       input, select { font: inherit; padding: 6px 10px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg); color: var(--fg); }
@@ -45,7 +48,7 @@
   </head>
   <body>
     <h1>Webapps</h1>
-    <p class="sub">Each app's frontend and backend are checked through nginx when this page loads.</p>
+    <p class="sub">Each app's frontend and backend (and pgweb, if enabled) are checked through nginx when this page loads.</p>
 
     <div class="toolbar"><button id="test-all" type="button">Re-test all</button></div>
     <div id="apps"></div>
@@ -62,10 +65,11 @@
     <div id="custom-result"></div>
 
     <script>
-      // Add an entry here when adding a webapp (alongside nginx/apps/<name>.conf).
+      // Add an entry here when adding a webapp (alongside nginx/apps/<name>.conf). `kind` picks the checks below.
       const APPS = [
-        { name: "App 1", path: "/app1/" },
-        { name: "App 2", path: "/app2/" },
+        { name: "App 1", path: "/app1/", kind: "webapp" },
+        { name: "App 2", path: "/app2/", kind: "webapp" },
+        { name: "pgweb", path: "/pgweb/", kind: "pgweb" },
       ];
 
       const TIMEOUT_MS = 8000;
@@ -147,6 +151,29 @@
         setRow(row, "warn", `${res.status}`, `Unexpected response: ${body.slice(0, 200)} (${ms} ms)`);
       }
 
+      // pgweb is optional: 404 = PGWEB_VIA_HTTPS is off, 503 = its compose project isn't running (nginx/apps/pgweb.conf).
+      async function testPgweb(app, row) {
+        setRow(row, "pending", "testing…");
+        const r = await probe(`${app.path}api/databases`);
+        if (!r.reached) return setRow(row, "fail", "unreachable", r.error);
+        const { res, body, ms } = r;
+        if (res.status === 401) return setRow(row, "ok", "login", `Reachable; asks for PGWEB_AUTH_USER / PGWEB_AUTH_PASS (${ms} ms)`);
+        if (res.status === 404) return setRow(row, "warn", "off", `Set PGWEB_VIA_HTTPS=true and restart pgweb, or use http://${location.hostname}:8081 on the host (${ms} ms)`);
+        if (res.status === 503) return setRow(row, "warn", "stopped", `docker compose -f docker-compose.pgweb.yml up -d (${ms} ms)`);
+        let dbs = null;
+        try { dbs = JSON.parse(body); } catch {}
+        if (res.ok && Array.isArray(dbs)) return setRow(row, "ok", `OK ${res.status}`, `databases: ${dbs.join(", ")} (${ms} ms)`);
+        setRow(row, "fail", `${res.status}`, `${res.statusText} ${body.slice(0, 200)} (${ms} ms)`.trim());
+      }
+
+      const CHECKS = {
+        webapp: (app) => [
+          ["Frontend", app.path, testFrontend],
+          ["Backend", `${app.path}api/health`, testBackend],
+        ],
+        pgweb: (app) => [["Database", `${app.path}api/databases`, testPgweb]],
+      };
+
       const appsEl = document.getElementById("apps");
       const rows = APPS.map((app) => {
         const card = el("div", "card");
@@ -154,18 +181,25 @@
         const link = el("a");
         link.href = app.path;
         link.append(`${app.name} `, el("small", null, `— ${app.path}`));
+        const go = el("a", "go", "Go");
+        go.href = app.path;
+        go.title = `Open ${app.name}`;
         const btn = el("button", null, "Test");
         btn.type = "button";
-        head.append(link, btn);
+        const actions = el("div", "actions");
+        actions.append(btn, go);
+        head.append(link, actions);
         const checks = el("div", "checks");
-        const fe = makeRow("Frontend", app.path);
-        const be = makeRow("Backend", `${app.path}api/health`);
-        checks.append(fe.wrap, be.wrap);
+        const tests = CHECKS[app.kind](app).map(([label, target, test]) => {
+          const row = makeRow(label, target);
+          checks.append(row.wrap);
+          return () => test(app, row);
+        });
         card.append(head, checks);
         appsEl.append(card);
         const run = async () => {
           btn.disabled = true;
-          await Promise.all([testFrontend(app, fe), testBackend(app, be)]);
+          await Promise.all(tests.map((t) => t()));
           btn.disabled = false;
         };
         btn.addEventListener("click", run);

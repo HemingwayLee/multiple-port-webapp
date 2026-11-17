@@ -160,3 +160,8 @@ services:
 
 volumes:
   pgdata:
+
+networks:
+  # Fixed name so docker-compose.pgweb.yml (a separate project) can join it.
+  default:
+    name: multiple-port-webapp

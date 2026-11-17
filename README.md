@@ -26,6 +26,7 @@ docker compose -f docker-compose.dev.yml up --build
 | App 2          | https://localhost/app2/               |
 | App 2 API docs | https://localhost/app2/api/docs       |
 | Postgres       | localhost:5432 (postgres/postgres; app1/app1 → db app1; app2/app2 → db app2) |
+| pgweb (optional, see below) | http://localhost:8081, or https://localhost/pgweb/ with `PGWEB_VIA_HTTPS=true` |
 
 http://localhost redirects to HTTPS. Locally the certificate is self-signed (generated into `nginx/certs/` on first
 `up`), so the browser warns once. For a trusted local cert, create one with
@@ -33,6 +34,29 @@ http://localhost redirects to HTTPS. Locally the certificate is self-signed (gen
 
 For debugging, each service is also published on 127.0.0.1 only: frontends at http://localhost:5101/app1/ and
 http://localhost:5102/app2/ (Vite proxies their API the same way nginx does), backends at :8101 and :8102.
+
+## Database browser (pgweb, optional)
+
+[pgweb](https://github.com/sosedoff/pgweb) lives in its own compose file and project (`multiple-port-webapp-pgweb`)
+that joins the main stack's network (`multiple-port-webapp`), so it can be started and stopped without touching the apps:
+
+```bash
+docker compose -f docker-compose.dev.yml up -d       # main stack first (it creates the network)
+docker compose -f docker-compose.pgweb.yml up -d     # http://localhost:8081
+docker compose -f docker-compose.pgweb.yml down      # stop pgweb only
+```
+
+It connects as the Postgres superuser to `postgres`; pick `app1`/`app2` from its database menu. A small nginx
+(`tools/pgweb/`) sits in front of it and adds `custom/json-viewer.js` (pretty-printed JSON in the cell popup). Port
+8081 is bound to 127.0.0.1 because pgweb has no login; on a server, reach it with an SSH tunnel (`ssh -L 8081:localhost:8081`).
+
+To also open it from the main site at https://localhost/pgweb/, set `PGWEB_VIA_HTTPS=true` in `.env` and restart
+pgweb (`docker compose -f docker-compose.pgweb.yml up -d`). Port 443 listens on all interfaces, so anyone who can
+reach this machine gets superuser access to the database: unless it's only your laptop, also set `PGWEB_AUTH_USER` /
+`PGWEB_AUTH_PASS` (HTTP basic auth, applies to both ports). With the setting off, /pgweb/ returns 404; with pgweb
+stopped, 503.
+Stop pgweb before `docker compose -f docker-compose.dev.yml down`, otherwise the network can't be removed while
+pgweb is still attached.
 
 ## How it works
 
@@ -57,7 +81,7 @@ http://localhost:5102/app2/ (Vite proxies their API the same way nginx does), ba
    `frontend/package.json`, `frontend/vite.config.js` and `frontend/index.html`.
 2. `docker-compose.dev.yml`: copy the two `app1-*` services as `app3-*` (ports, `APP_NAME`, `ROOT_PATH`,
    `BASE_PATH`, `API_PROXY_TARGET`, `DATABASE_URL`) and add `app3:${APP3_DB_PASSWORD:-app3}` to `APP_DATABASES`.
-3. `cp nginx/apps/app1.conf nginx/apps/app3.conf` and replace the names and ports. Add a link in `nginx/html/index.html`.
+3. `cp nginx/apps/app1.conf nginx/apps/app3.conf` and replace the names and ports. Add an entry to `APPS` in `nginx/html/index.html` (it gets a card with checks and a Go button).
 4. `docker compose -f docker-compose.dev.yml up --build -d` (db-init creates the new database; no reset needed).
 
 ## On a server
