@@ -156,7 +156,7 @@ Add `APP3_DB_PASSWORD=app3` to `.env.example` (and to `.env` if you have one). O
 ### 4. Route it in nginx
 
 ```bash
-perl -pe 's/app1/app3/g; s/5101/5103/g; s/8101/8103/g' nginx/apps/app1.conf > nginx/apps/app3.conf
+sed -e 's/app1/app3/g' -e 's/5101/5103/g' -e 's/8101/8103/g' nginx/apps/app1.conf > nginx/apps/app3.conf
 ```
 
 This sends `/app3/api/*` to `app3-backend:8103` with the `/app3` prefix removed, and everything else under `/app3/`
